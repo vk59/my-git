@@ -105,7 +105,7 @@ argsp = argsubparsers.add_parser(
     "rev-parse",
     help="Parse revision (or other objects )identifiers")
 
-argsp.add_argument("--wyag-type",
+argsp.add_argument("--vkgit-type",
                    metavar="type",
                    dest="type",
                    choices=["blob", "commit", "tag", "tree"],
@@ -657,7 +657,7 @@ def cmd_hash_object(args):
 def cmd_log(args):
     repo = repo_find()
 
-    print("digraph wyaglog{")
+    print("digraph vkgitlog{")
     log_graphviz(repo, object_find(repo, args.commit), set())
     print("}")
 
