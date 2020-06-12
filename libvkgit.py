@@ -1,6 +1,6 @@
 import argparse
 
-from my_git_parsing import *
+from gitlib import *
 
 
 
@@ -52,66 +52,14 @@ argsp.add_argument("-w",
 argsp.add_argument("path",
                    help="Read object from <file>")
 
-# subparser log
-argsp = argsubparsers.add_parser("log", help="Display history of a given commit.")
-
-argsp.add_argument("commit",
-                   default="HEAD",
-                   nargs="?",
-                   help="Commit to start at.")
-
 # subparser ls-tree
 argsp = argsubparsers.add_parser("ls-tree", help="Pretty-print a tree object.")
 
 argsp.add_argument("object",
                    help="The object to show.")
 
-# subparser checkout
-argsp = argsubparsers.add_parser("checkout", help="Checkout a commit inside of a directory.")
-
-argsp.add_argument("commit",
-                   help="The commit or tree to checkout.")
-
-argsp.add_argument("path",
-                   help="The EMPTY directory to checkout on.")
-
-# subparser show-ref
-argsp = argsubparsers.add_parser("show-ref", help="List references.")
-
-# subparser tag
-argsp = argsubparsers.add_parser(
-    "tag",
-    help="List and create tags")
-
-argsp.add_argument("-a",
-                    action="store_true",
-                    dest="create_tag_object",
-                    help="Whether to create a tag object")
-
-argsp.add_argument("name",
-                    nargs="?",
-                    help="The new tag's name")
-
-argsp.add_argument("object",
-                    default="HEAD",
-                    nargs="?",
-                    help="The object the new tag will point to")
-
-# subparser rev-parse
-argsp = argsubparsers.add_parser(
-    "rev-parse",
-    help="Parse revision (or other objects )identifiers")
-
-argsp.add_argument("--vkgit-type",
-                   metavar="type",
-                   dest="type",
-                   choices=["blob", "commit", "tag", "tree"],
-                   default=None,
-                   help="Specify the expected type")
-
-argsp.add_argument("name",
-                   help="The name to parse")
-
+# subparser write-tree
+argsp = argsubparsers.add_parser("write-tree", help="Write a tree object.")
 
 # COMMANDS
 def cmd_init(args):
@@ -161,68 +109,16 @@ def cmd_ls_tree(args):
             item.path.decode("ascii")))
 
 
-def cmd_checkout(args):
-    repo = repo_find()
-
-    obj = object_read(repo, object_find(repo, args.commit))
-
-    # If the object is a commit, we grab its tree
-    if obj.fmt == b'commit':
-        obj = object_read(repo, obj.kvlm[b'tree'].decode("ascii"))
-
-    # Verify that path is an empty directory
-    if os.path.exists(args.path):
-        if not os.path.isdir(args.path):
-            raise Exception("Not a directory {0}!".format(args.path))
-        if os.listdir(args.path):
-            raise Exception("Not empty {0}!".format(args.path))
-    else:
-        os.makedirs(args.path)
-
-    tree_checkout(repo, obj, os.path.realpath(args.path).encode()) 
-
-
-def cmd_show_ref(args):
-    repo = repo_find()
-    refs = ref_list(repo)
-    show_ref(repo, refs, prefix="refs")
-
-
-def cmd_tag(args):
-    repo = repo_find()
-
-    if args.name:
-        tag_create(args.name,
-                   args.object,
-                   type="object" if args.create_tag_object else "ref")
-    else:
-        refs = ref_list(repo)
-        show_ref(repo, refs["tags"], with_hash=False)
-
-
-def cmd_rev_parse(args):
-    if args.type:
-        fmt = args.type.encode()
-
-    repo = repo_find()
-
-    print (object_find(repo, args.name, args.type, follow=True))
+def cmd_write_tree():
+    sha = write_tree()
+    print(sha)
 
 
 def main(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
-
-    # if   args.command == "add"         : cmd_add(args)
     if args.command == "cat-file"    : cmd_cat_file(args)
-    elif args.command == "checkout"    : cmd_checkout(args)
-    # elif args.command == "commit"      : cmd_commit(args)
+    elif args.command == "write-tree"  : cmd_write_tree()
     elif args.command == "hash-object" : cmd_hash_object(args)
     elif args.command == "init"        : cmd_init(args)
     elif args.command == "log"         : cmd_log(args)
     elif args.command == "ls-tree"     : cmd_ls_tree(args)
-    # elif args.command == "merge"       : cmd_merge(args)
-    # elif args.command == "rebase"      : cmd_rebase(args)
-    elif args.command == "rev-parse"   : cmd_rev_parse(args)
-    # elif args.command == "rm"          : cmd_rm(args)
-    elif args.command == "show-ref"    : cmd_show_ref(args)
-    elif args.command == "tag"         : cmd_tag(args)

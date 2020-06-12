@@ -4,14 +4,19 @@ import hashlib
 import os
 import re
 import sys
-import zlib 
-from typing import Optional
+import zlib
+import struct
 
 Path = str
 Hash = str
 PathArgs = tuple
 Data = str
-KVLM = collections.OrderedDict
+
+
+IndexEntry = collections.namedtuple('IndexEntry', [
+    'ctime_s', 'ctime_n', 'mtime_s', 'mtime_n', 'dev', 'ino', 'mode',
+    'uid', 'gid', 'size', 'sha1', 'flags', 'path',
+])
 
 
 class GitRepository(object):
@@ -41,7 +46,7 @@ class GitRepository(object):
             vers = int(self.conf.get("core", "repositoryformatversion"))
             if vers != 0:
                 raise Exception("Unsupported repositoryformatversion %s" % vers)
-    
+
 
 class GitObject (object):
 
@@ -71,16 +76,6 @@ class GitBlob(GitObject):
         self.blobdata = data
 
 
-class GitCommit(GitObject):
-    fmt=b'commit'   
-
-    def deserialize(self, data):
-        self.kvlm = kvlm_parse(data)
-
-    def serialize(self):
-        return kvlm_serialize(self.kvlm)
-
-
 class GitTreeLeaf(object):
     def __init__(self, mode, path, sha):
         self.mode = mode
@@ -97,22 +92,17 @@ class GitTree(GitObject):
     def serialize(self):
         return tree_serialize(self)
 
-
-class GitTag(GitCommit):
-    fmt = b'tag'
-
-
-def repo_path(repo: Path, *pathargs: PathArgs):
+def repo_path(repo , *pathargs: PathArgs):
     """Compute path under repo's gitdir."""
     return os.path.join(repo.gitdir, *pathargs)
 
 
-def repo_file(repo: Path, *path: PathArgs, mkdir=False):
+def repo_file(repo , *path: PathArgs, mkdir=False):
     if repo_dir(repo, *path[:-1], mkdir=mkdir):
         return repo_path(repo, *path)
 
 
-def repo_dir(repo: Path, *path: PathArgs, mkdir=False):
+def repo_dir(repo, *path: PathArgs, mkdir=False):
     """Same as repo_path, but mkdir *path if absent if mkdir."""
     path = repo_path(repo, *path)
 
@@ -196,11 +186,10 @@ def repo_find(path=".", required=True):
     return repo_find(parent, required)
 
 
-def object_read(repo: Path, sha: Hash):
+def object_read(repo , sha: Hash):
     """Read object object_id from Git repository repo.  Return a
     GitObject whose exact type depends on the object."""
-    path = repo_file(repo, "objects", sha[0:2], sha[2:])
-
+    path = repo_file(repo, "objects", sha[0:2], sha[2:], mkdir=True)
     with open (path, "rb") as f:
         raw = zlib.decompress(f.read())
 
@@ -226,7 +215,7 @@ def object_read(repo: Path, sha: Hash):
         return c(repo, raw[y+1:])
 
 
-def ref_resolve(repo: Path, ref):
+def ref_resolve(repo , ref):
     with open(repo_file(repo, ref), 'r') as fp:
         data = fp.read()[:-1]
         # Drop final \n ^^^^^
@@ -253,49 +242,33 @@ def ref_list(repo, path=None):
 
 
 def object_resolve(repo, name):
-    """Resolve name to an object hash in repo.
-
-This function is aware of:
-
- - the HEAD literal
- - short and long hashes
- - tags
- - branches
- - remote branches"""
+    """Resolve name to an object hash in repo. """
     candidates = list()
-    hashRE = re.compile(r"^[0-9A-Fa-f]{1,16}$")
-    smallHashRE = re.compile(r"^[0-9A-Fa-f]{1,16}$")
 
     # Name is empty
     if not name.strip():
         return None
 
-    # Head is nonambiguous
-    if name == "HEAD":
-        return [ ref_resolve(repo, "HEAD") ]
-
-
-    if hashRE.match(name):
-        if len(name) == 40:
-            # This is a complete hash
-            return [ name.lower() ]
-        elif len(name) >= 4:
-            # This is a small hash 4 seems to be the minimal length
-            # for git to consider something a short hash.
-            # This limit is documented in man git-rev-parse
-            name = name.lower()
-            prefix = name[0:2]
-            path = repo_dir(repo, "objects", prefix, mkdir=False)
-            if path:
-                rem = name[2:]
-                for f in os.listdir(path):
-                    if f.startswith(rem):
-                        candidates.append(prefix + f)
+    if len(name) == 40:
+        # This is a complete hash
+        return [ name.lower() ]
+    elif len(name) >= 4:
+        # This is a small hash 4 seems to be the minimal length
+        # for git to consider something a short hash.
+        # This limit is documented in man git-rev-parse
+        name = name.lower()
+        prefix = name[0:2]
+        path = repo_dir(repo, "objects", prefix, mkdir=False)
+        if path:
+            rem = name[2:]
+            for f in os.listdir(path):
+                if f.startswith(rem):
+                    candidates.append(prefix + f)
 
     return candidates
 
 
-def object_find(repo: Path, name: str, fmt=None, follow=True):
+def object_find(repo , name: str, fmt=None, follow=True):
     sha = object_resolve(repo, name)
 
     if not sha:
@@ -349,116 +322,79 @@ def object_hash(fd, fmt: bytes, repo=None):
     # Choose constructor depending on
     # object type found in header.
     if fmt == b'blob'     : obj = GitBlob(repo, data)
-    elif fmt == b'commit' : obj = GitCommit(repo, data)
+    # elif fmt == b'commit' : obj = GitCommit(repo, data)
     elif fmt == b'tree'   : obj = GitTree(repo, data)
-    elif fmt == b'tag'    : obj = GitTag(repo, data)
-    
+    # elif fmt == b'tag'    : obj = GitTag(repo, data)
+    #
     else:
         raise Exception("Unknown type %s!" % fmt)
 
     return object_write(obj, repo)
 
 
-def kvlm_parse(raw: Data, start=0, dct=None):
-    """ Key-Value List with Message. """
-    if not dct:
-        dct = collections.OrderedDict()
-        # You CANNOT declare the argument as dct=OrderedDict() or all
-        # call to the functions will endlessly grow the same dict.
-
-    # We search for the next space and the next newline.
-    spc = raw.find(b' ', start)
-    nl = raw.find(b'\n', start)
-
-    # If space appears before newline, we have a keyword.
-
-    # Base case
-    # =========
-    # If newline appears first (or there's no space at all, in which
-    # case find returns -1), we assume a blank line.  A blank line
-    # means the remainder of the data is the message.
-    if (spc < 0) or (nl < spc):
-        assert(nl == start)
-        dct[b''] = raw[start+1:]
-        return dct
-
-    # Recursive case
-    # ==============
-    # we read a key-value pair and recurse for the next.
-    key = raw[start:spc]
-
-    # Find the end of the value.  Continuation lines begin with a
-    # space, so we loop until we find a "\n" not followed by a space.
-    end = start
-    while True:
-        end = raw.find(b'\n', end+1)
-        if raw[end+1] != ord(' '): break
-
-    # Grab the value
-    # Also, drop the leading space on continuation lines
-    value = raw[spc+1:end].replace(b'\n ', b'\n')
-
-    # Don't overwrite existing data contents
-    if key in dct:
-        if type(dct[key]) == list:
-            dct[key].append(value)
-        else:
-            dct[key] = [ dct[key], value ]
-    else:
-        dct[key]=value
-
-    return kvlm_parse(raw, start=end+1, dct=dct)
+def hash_tree(data, obj_type, write=True):
+    """Compute hash of object data of given type and write to object store
+    if "write" is True. Return SHA-1 object hash as hex string.
+    """
+    header = '{} {}'.format(obj_type, len(data)).encode()
+    full_data = header + b'\x00' + data
+    sha1 = hashlib.sha1(full_data).hexdigest()
+    if write:
+        path = os.path.join('.git', 'objects', sha1[:2], sha1[2:])
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(zlib.compress(full_data))
+            # write_file(path, zlib.compress(full_data))
+    return sha1
 
 
-def kvlm_serialize(kvlm: KVLM):
-    ret = b''
+def read_index():
+    """Read git index file and return list of IndexEntry objects."""
+    try:
+        with open (os.path.join('.git', 'index'), 'rb') as dataf:
+            data = dataf.read()
+    except FileNotFoundError:
+        return []
+    digest = hashlib.sha1(data[:-20]).digest()
+    # assert digest == data[-20:], 'invalid index checksum'
+    signature, version, num_entries = struct.unpack('!4sLL', data[:12])
+    assert signature == b'DIRC', \
+            'invalid index signature {}'.format(signature)
+    assert version == 2, 'unknown index version {}'.format(version)
+    entry_data = data[12:-20]
+    entries = []
+    i = 0
+    while i + 62 < len(entry_data):
+        fields_end = i + 62
+        fields = struct.unpack('!LLLLLLLLLL20sH',
+                               entry_data[i:fields_end])
+        path_end = entry_data.index(b'\x00', fields_end)
+        path = entry_data[fields_end:path_end]
+        entry = IndexEntry(*(fields + (path.decode(),)))
+        entries.append(entry)
+        entry_len = ((62 + len(path) + 8) // 8) * 8
+        i += entry_len
+    assert len(entries) == num_entries
+    return entries
 
-    # Output fields
-    for k in kvlm.keys():
-        # Skip the message itself
-        if k == b'': continue
-        val = kvlm[k]
-        # Normalize to a list
-        if type(val) != list:
-            val = [ val ]
 
-        for v in val:
-            ret += k + b' ' + (v.replace(b'\n', b'\n ')) + b'\n'
-
-    # Append message
-    ret += b'\n' + kvlm[b'']
-
-    return ret
-
-
-def log_graphviz(repo: Path, sha: Hash, seen):
-
-    if sha in seen:
-        return
-    seen.add(sha)
-
-    commit = object_read(repo, sha)
-    assert (commit.fmt==b'commit')
-
-    if not b'parent' in commit.kvlm.keys():
-        # Base case: the initial commit.
-        return
-
-    parents = commit.kvlm[b'parent']
-
-    if type(parents) != list:
-        parents = [ parents ]
-
-    for p in parents:
-        p = p.decode("ascii")
-        print ("c_{0} -> c_{1};".format(sha, p))
-        log_graphviz(repo, p, seen)
+def write_tree():
+    """Write a tree object from the current index entries."""
+    tree_entries = []
+    for entry in read_index():
+        assert '/' not in entry.path, \
+                'currently only supports a single, top-level directory'
+        mode_path = '{:o} {}'.format(entry.mode, entry.path).encode()
+        tree_entry = mode_path + b'\x00' + entry.sha1
+        tree_entries.append(tree_entry)
+    return hash_tree(b''.join(tree_entries), 'tree')
 
 
 def tree_parse_one(raw: Data, start=0):
     # Find the space terminator of the mode
     x = raw.find(b' ', start)
-    assert(x-start == 5 or x-start==6)
+    # assert(x-start == 5 or x-start == 6)
 
     # Read the mode
     mode = raw[start:x]
@@ -471,8 +407,9 @@ def tree_parse_one(raw: Data, start=0):
     # Read the SHA and convert to an hex string
     sha = hex(
         int.from_bytes(
-            raw[y+1:y+21], "big"))[2:] # hex() adds 0x in front,
+            raw[y:y+21], "big"))[2:] # hex() adds 0x in front,
                                            # we don't want that.
+
     return y+21, GitTreeLeaf(mode, path, sha)
 
 
@@ -483,7 +420,6 @@ def tree_parse(raw: Data):
     while pos < max:
         pos, data = tree_parse_one(raw, pos)
         ret.append(data)
-
     return ret
 
 
@@ -499,27 +435,3 @@ def tree_serialize(obj: GitObject):
         # @FIXME Does
         ret += sha.to_bytes(20, byteorder="big")
     return ret
-
-
-def tree_checkout(repo: Path, tree, path: Path):
-    for item in tree.items:
-        obj = object_read(repo, item.sha)
-        dest = os.path.join(path, item.path)
-
-        if obj.fmt == b'tree':
-            os.mkdir(dest)
-            tree_checkout(repo, obj, dest)
-        elif obj.fmt == b'blob':
-            with open(dest, 'wb') as f:
-                f.write(obj.blobdata)
-
-
-def show_ref(repo: Path, refs, with_hash=True, prefix=""):
-    for k, v in refs.items():
-        if type(v) == str:
-            print ("{0}{1}{2}".format(
-                v + " " if with_hash else "",
-                prefix + "/" if prefix else "",
-                k))
-        else:
-            show_ref(repo, v, with_hash=with_hash, prefix="{0}{1}{2}".format(prefix, "/" if prefix else "", k))
